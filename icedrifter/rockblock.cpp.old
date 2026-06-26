@@ -1,0 +1,242 @@
+#include <Arduino.h>
+#include <IridiumSBD.h>
+#include <SoftwareSerial.h>
+
+#include "icedrifter.h"
+#include "rockblock.h"
+
+SoftwareSerial isbdss(ROCKBLOCK_RX_PIN, ROCKBLOCK_TX_PIN);
+
+IridiumSBD isbd(isbdss, ROCKBLOCK_SLEEP_PIN);
+
+iceDrifterChunk idcChunk;
+
+char rbhexchars[] = "0123456789ABCDEF";
+
+#ifdef SERIAL_DEBUG_ROCKBLOCK
+void rbprintHexChar(uint8_t x) {
+  DEBUG_SERIAL.print(rbhexchars[(x >> 4)]);
+  DEBUG_SERIAL.print(rbhexchars[(x & 0x0f)]);
+}
+
+void ISBDConsoleCallback(IridiumSBD *device, char c) {
+  DEBUG_SERIAL.write(c);
+}
+
+void ISBDDiagsCallback(IridiumSBD *device, char c) {
+  DEBUG_SERIAL.write(c);
+}
+#endif
+
+void rbTransmitIcedrifterData(icedrifterData *idPtr, int idLen) {
+
+  int rc;
+  int recCount;
+  int dataLen;
+  int chunkLen;
+  int i;
+  uint8_t *dataPtr;
+  uint8_t *chunkPtr;
+  uint8_t *wkPtr;
+  uint8_t *msgBuffPtr;
+  struct tm *timeInfo;
+  char *buffPtr;
+  char buff[128];
+  char oBuff[340];
+
+if (dataLen == 0) {
+    oBuff[0] = 0;
+    strcat(oBuff, "\nGMT=");
+    timeInfo = gmtime(&idPtr->idGPSTime);
+    buffPtr = asctime(timeInfo);
+    strcat(oBuff, buffPtr);
+
+//#define SERIAL_DEBUG_ROCKBLOCK_GMT
+
+#ifdef SERIAL_DEBUG_ROCKBLOCK_GMT
+    DEBUG_SERIAL.print("\nGMT debug=");
+    DEBUG_SERIAL.print(buffPtr);
+    DEBUG_SERIAL.print("\n");
+#endif // SERIAL_DEBUG_ROCKBLOCK_GMT
+
+    strcat(oBuff, "\nLBT=");
+    timeInfo = gmtime(&idPtr->idLastBootTime);
+    buffPtr = asctime(timeInfo);
+    strcat(oBuff, buffPtr);
+    strcat(oBuff, "\nLat=");
+    buffPtr = dtostrf(idPtr->idLatitude, 4, 6, buff);
+    strcat(oBuff, buffPtr);
+    strcat(oBuff, "\nLon=");
+    buffPtr = dtostrf(idPtr->idLongitude, 4, 6, buff);
+    strcat(oBuff, buffPtr);
+//    strcat(oBuff, "\nTmp=");
+//    buffPtr = dtostrf(idPtr->idTemperature, 4, 2, buff);
+//    strcat(oBuff, buffPtr);
+    strcat(oBuff, "\nBP=");
+    buffPtr = dtostrf(idPtr->idPressure, 6, 2, buff);
+    strcat(oBuff, buffPtr);
+    strcat(oBuff, " hPa\nTs=");
+    buffPtr = dtostrf(idPtr->idRemoteTemp, 4, 2, buff);
+    strcat(oBuff, buffPtr);
+    strcat(oBuff, " C = ");
+    buffPtr = dtostrf(((idPtr->idRemoteTemp * 1.8) + 32), 4, 2, buff);
+    strcat(oBuff, buffPtr);
+    strcat(oBuff, " F\n");
+    strcat(oBuff, "\nIcedrifter H/V ");
+    strcat(oBuff, HARDWARE_VERSION);
+    strcat(oBuff, " S/V ");
+    strcat(oBuff, SOFTWARE_VERSION);
+
+#ifdef SERIAL_DEBUG_ROCKBLOCK
+    strcat(oBuff, "\n*** Debug is ON ***\n");
+    DEBUG_SERIAL.print(oBuff);
+    delay(1000);  
+#endif // SERIAL_DEBUG_ROCKBLOCK
+  }
+
+#ifdef NEVER_TRANSMIT
+  #ifdef SERIAL_DEBUG_ROCKBLOCK
+    DEBUG_SERIAL.print(F("Transmission disabled by NEVER_TRANSMIT switch.\n"));
+  #endif
+#else // NEVER_TRANSMIT
+
+  // Setup the RockBLOCK
+  isbd.setPowerProfile(IridiumSBD::USB_POWER_PROFILE);
+
+#ifdef SERIAL_DEBUG_ROCKBLOCK
+  DEBUG_SERIAL.flush();
+  DEBUG_SERIAL.println(F("Powering up RockBLOCK\n"));
+  DEBUG_SERIAL.flush();
+#endif // SERIAL_DEBUG_ROCKBLOCK
+
+  digitalWrite(ROCKBLOCK_POWER_PIN, HIGH);
+  delay(1000);
+
+  isbdss.begin(ROCKBLOCK_BAUD);
+
+  // Step 3: Start talking to the RockBLOCK and power it up
+#ifdef SERIAL_DEBUG_ROCKBLOCK
+  DEBUG_SERIAL.flush();
+  DEBUG_SERIAL.println(F("RockBLOCK begin\n"));
+  DEBUG_SERIAL.flush();
+#endif // SERIAL_DEBUG_ROCKBLOCK
+  isbdss.listen();
+
+  if ((rc = isbd.begin()) == ISBD_SUCCESS) {
+
+//#ifdef SERIAL_DEBUG_ROCKBLOCK
+//
+//    if (idlen == 0) {
+//      idlen = strlen(oMessage)
+//    }
+//
+//    DEBUG_SERIAL.flush();
+//    DEBUG_SERIAL.print(F("Transmitting address="));
+//    DEBUG_SERIAL.print((long)idPtr, HEX);
+//    DEBUG_SERIAL.print(F(" length="));
+//    DEBUG_SERIAL.print(idLen);
+//    DEBUG_SERIAL.print(F("\n"));
+//    DEBUG_SERIAL.flush();
+//
+//#endif // SERIAL_DEBUG_ROCKBLOCK
+
+    recCount = 0;
+    dataPtr = (uint8_t *)idPtr;
+    chunkPtr = (uint8_t *)&idcChunk.idcBuffer;
+    dataLen = idLen;
+
+    if (dataLen == 0) {
+      dataLen = strlen(oBuff) + 1;
+
+#ifdef SERIAL_DEBUG_ROCKBLOCK
+
+      DEBUG_SERIAL.flush();
+      DEBUG_SERIAL.print(F("oBuff adress="));
+      DEBUG_SERIAL.print((long)oBuff, HEX);
+      DEBUG_SERIAL.print(F(" oBuff msg length="));
+      DEBUG_SERIAL.print((strlen(oBuff)) + 1);
+      DEBUG_SERIAL.print(F("\n"));
+      DEBUG_SERIAL.flush();
+
+#endif // SERIAL_DEBUG_ROCKBLOCK
+
+      rc = isbd.sendSBDBinary((uint8_t *)&oBuff, dataLen);
+
+    } else {
+
+      while (dataLen > 0) {
+        idcChunk.idcSendTime = idPtr->idGPSTime;
+        idcChunk.idcRecordType[0] = 'I';
+        idcChunk.idcRecordType[1] = 'D';
+        idcChunk.idcRecordNumber = recCount;
+
+        if (dataLen > MAX_CHUNK_DATA_LENGTH) {
+          chunkLen = MAX_CHUNK_LENGTH;
+          dataLen -= MAX_CHUNK_DATA_LENGTH;
+        } else {
+          chunkLen = (dataLen + CHUNK_HEADER_SIZE);
+          dataLen = 0;
+        }
+
+        memmove(chunkPtr, dataPtr, chunkLen);
+        dataPtr += MAX_CHUNK_DATA_LENGTH;
+        ++recCount;
+
+#ifdef SERIAL_DEBUG_ROCKBLOCK
+        DEBUG_SERIAL.flush();
+        DEBUG_SERIAL.print(F("Chunk address="));
+        DEBUG_SERIAL.print((long)chunkPtr, HEX);
+        DEBUG_SERIAL.print(F(" Chunk length="));
+        DEBUG_SERIAL.print(chunkLen);
+        DEBUG_SERIAL.print(F("\n"));
+
+        wkPtr = (uint8_t *)&idcChunk;
+
+        for (i = 0; i < chunkLen; i++) {
+          rbprintHexChar((uint8_t)*wkPtr);
+          ++wkPtr;
+        }
+
+        DEBUG_SERIAL.print(F("\n"));
+        DEBUG_SERIAL.flush();
+#endif // SERIAL_DEBUG_ROCKBLOCK
+
+       rc = isbd.sendSBDBinary((uint8_t *)&idcChunk, chunkLen);
+
+      }
+    }
+
+    if ((msgBuffPtr = checkForMessage()) != NULL) {
+      rc = isbd.sendSBDText(msgBuffPtr);
+    }
+
+#ifdef SERIAL_DEBUG_ROCKBLOCK
+    DEBUG_SERIAL.flush();
+    if (rc == 0) {
+      DEBUG_SERIAL.print(F("Good return code from send!\n"));
+      DEBUG_SERIAL.flush();
+    } else {
+      DEBUG_SERIAL.print(F("Bad return code from send = "));
+      DEBUG_SERIAL.print(rc);
+      DEBUG_SERIAL.print(F("\n"));
+      DEBUG_SERIAL.flush();
+    }
+#endif // SERIAL_DEBUG_ROCKBLOCK
+
+#ifdef SERIAL_DEBUG_ROCKBLOCK
+  } else {
+    DEBUG_SERIAL.print("Bad return code from begin = ");
+    DEBUG_SERIAL.print(rc);
+    DEBUG_SERIAL.print("\n");
+    DEBUG_SERIAL.flush();
+#endif // SERIAL_DEBUG_ROCKBLOCK
+  }
+
+  isbd.sleep();
+  isbdss.end();
+  digitalWrite(ROCKBLOCK_POWER_PIN, LOW);
+
+#endif // NEVER_TRANSMIT
+}
+
+
